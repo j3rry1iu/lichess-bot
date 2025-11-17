@@ -104,8 +104,8 @@ class MyPyTorchBot(MinimalEngine):
             model=MODEL,
             device=DEVICE,
             depth=3,
-            root_k=20,
-            child_k=10,
+            root_k=10,
+            child_k=5,
         )
 
         if best_move is None:
@@ -126,6 +126,6 @@ class MyPyTorchBot(MinimalEngine):
             info={
                 # Convert float score to a centipawn score object
                 "score": chess.engine.PovScore(chess.engine.Cp(int(best_score * 100)), chess.WHITE),
-                "depth": 10
+                "depth": 5
             }
         )
