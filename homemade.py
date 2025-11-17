@@ -1,96 +1,131 @@
-"""
-Some example classes for people who want to create a homemade bot.
-
-With these classes, bot makers will not have to implement the UCI or XBoard interfaces themselves.
-"""
 import chess
-from chess.engine import PlayResult, Limit
-import random
+import torch
+import os
+import sys
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+
+# --- 1. CORRECT IMPORTS ---
+# These imports match the files in your lichess-bot repository
+import chess.engine
 from lib.engine_wrapper import MinimalEngine
-from lib.lichess_types import MOVE, HOMEMADE_ARGS_TYPE
-import logging
+from lib.lichess_types import MOVE, HOMEMADE_ARGS_TYPE, Limit
+
+# --- 2. IMPORT YOUR CODE ---
+# Add your copied 'src' folder to the Python path
+CURRENT_DIR = os.path.dirname(__file__)
+SRC_PATH = os.path.join(CURRENT_DIR, "src")
+if SRC_PATH not in sys.path:
+    sys.path.append(SRC_PATH)
+
+# Now, import all your modules from the 'src' folder
+try:
+    from models.chess_net import ChessNet
+    from search.search import choose_best_move
+    from board_encoder import encode_board
+except ImportError as e:
+    print("--- IMPORT ERROR ---")
+    print(f"Could not import bot modules from '{SRC_PATH}'")
+    print("Please make sure your 'src' folder is copied into this directory.")
+    print(f"Error: {e}")
+    sys.exit(1)
+
+# --- 3. DOWNLOAD AND LOAD YOUR MODEL (ONCE) ---
+print("[MyBot] Initializing ChessNet...")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"[MyBot] Using device: {DEVICE}")
+
+# --- !!! THIS IS YOUR HUGGING FACE REPO INFO !!! ---
+HF_REPO_ID = "HamzaAmmar/chesshacks-model"
+HF_FILENAME = "best.pt"
+
+# Define a local path to save/cache the weights
+WEIGHTS_DIR = Path(CURRENT_DIR) / "downloaded_weights"
+WEIGHTS_DIR.mkdir(exist_ok=True)
+
+# Use the full downloaded path from hf_hub_download
+print(f"[MyBot] Downloading weights from Hugging Face repo: {HF_REPO_ID}")
+try:
+    hf_token = os.environ.get("HF_TOKEN", None) 
+    downloaded_model_path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename=HF_FILENAME,
+        cache_dir=str(WEIGHTS_DIR),
+        token=hf_token
+    )
+    print(f"[MyBot] Weights downloaded to {downloaded_model_path}")
+except Exception as e:
+    print(f"!!! CRITICAL ERROR: Could not download weights from {HF_REPO_ID}")
+    print(f"!!! Error: {e}")
+    sys.exit(1)
+
+# Load the model weights
+MODEL = ChessNet().to(DEVICE)
+try:
+    # Load from the correct downloaded path
+    ckpt = torch.load(downloaded_model_path, map_location=DEVICE)
+    
+    if "model_state" in ckpt:
+        MODEL.load_state_dict(ckpt["model_state"]) 
+    else:
+        MODEL.load_state_dict(ckpt)
+    
+    MODEL.eval()
+    print(f"[MyBot] Successfully loaded model weights.")
+except Exception as e:
+    print(f"!!! CRITICAL ERROR: Failed to load model weights from {downloaded_model_path}")
+    print(f"!!! Make sure your .pt file matches the ChessNet architecture.")
+    print(f"!!! Error: {e}")
+    sys.exit(1)
 
 
-# Use this logger variable to print messages to the console or log files.
-# logger.info("message") will always print "message" to the console or log file.
-# logger.debug("message") will only print "message" if verbose logging is enabled.
-logger = logging.getLogger(__name__)
-
-
-class ExampleEngine(MinimalEngine):
-    """An example engine that all homemade engines inherit."""
-
-
-# Bot names and ideas from tom7's excellent eloWorld video
-
-class RandomMove(ExampleEngine):
-    """Get a random move."""
-
-    def search(self, board: chess.Board, *args: HOMEMADE_ARGS_TYPE) -> PlayResult:  # noqa: ARG002
-        """Choose a random move."""
-        return PlayResult(random.choice(list(board.legal_moves)), None)
-
-
-class Alphabetical(ExampleEngine):
-    """Get the first move when sorted by san representation."""
-
-    def search(self, board: chess.Board, *args: HOMEMADE_ARGS_TYPE) -> PlayResult:  # noqa: ARG002
-        """Choose the first move alphabetically."""
-        moves = list(board.legal_moves)
-        moves.sort(key=board.san)
-        return PlayResult(moves[0], None)
-
-
-class FirstMove(ExampleEngine):
-    """Get the first move when sorted by uci representation."""
-
-    def search(self, board: chess.Board, *args: HOMEMADE_ARGS_TYPE) -> PlayResult:  # noqa: ARG002
-        """Choose the first move alphabetically in uci representation."""
-        moves = list(board.legal_moves)
-        moves.sort(key=str)
-        return PlayResult(moves[0], None)
-
-
-class ComboEngine(ExampleEngine):
+# --- 4. CREATE THE BOT CLASS (The "Engine") ---
+# This class name ("MyPyTorchBot") MUST match what you put in config.yml
+# It now correctly extends MinimalEngine
+class MyPyTorchBot(MinimalEngine):
     """
-    Get a move using multiple different methods.
-
-    This engine demonstrates how one can use `time_limit`, `draw_offered`, and `root_moves`.
+    This class connects your trained model to the lichess-bot framework.
     """
+    def __init__(self, commands, options, stderr, draw_or_resign, game=None, **popen_args):
+        super().__init__(commands=commands, options=options, stderr=stderr,
+                     draw_or_resign=draw_or_resign, game=game,
+                     name="MyPyTorchBot", **popen_args)
 
-    def search(self,
-               board: chess.Board,
-               time_limit: Limit,
-               ponder: bool,  # noqa: ARG002
-               draw_offered: bool,
-               root_moves: MOVE) -> PlayResult:
+    def search(self, board: chess.Board, time_limit: Limit, ponder: bool, draw_offered: bool, root_moves: MOVE) -> chess.engine.PlayResult:
         """
-        Choose a move using multiple different methods.
-
-        :param board: The current position.
-        :param time_limit: Conditions for how long the engine can search (e.g. we have 10 seconds and search up to depth 10).
-        :param ponder: Whether the engine can ponder after playing a move.
-        :param draw_offered: Whether the bot was offered a draw.
-        :param root_moves: If it is a list, the engine should only play a move that is in `root_moves`.
-        :return: The move to play.
+        This is the main function called by lichess-bot when it's our turn.
+        It must RETURN a chess.engine.PlayResult object.
         """
-        if isinstance(time_limit.time, int):
-            my_time = time_limit.time
-            my_inc = 0
-        elif board.turn == chess.WHITE:
-            my_time = time_limit.white_clock if isinstance(time_limit.white_clock, int) else 0
-            my_inc = time_limit.white_inc if isinstance(time_limit.white_inc, int) else 0
-        else:
-            my_time = time_limit.black_clock if isinstance(time_limit.black_clock, int) else 0
-            my_inc = time_limit.black_inc if isinstance(time_limit.black_inc, int) else 0
+        print(f"[MyBot] Searching position: {board.fen()}")
 
-        possible_moves = root_moves if isinstance(root_moves, list) else list(board.legal_moves)
+        # Call your own search function from src/search/search.py
+        best_move, best_score = choose_best_move(
+            board=board,
+            model=MODEL,
+            device=DEVICE,
+            depth=3,
+            root_k=20,
+            child_k=10,
+        )
 
-        if my_time / 60 + my_inc > 10:
-            # Choose a random move.
-            move = random.choice(possible_moves)
-        else:
-            # Choose the first move alphabetically in uci representation.
-            possible_moves.sort(key=str)
-            move = possible_moves[0]
-        return PlayResult(move, None, draw_offered=draw_offered)
+        if best_move is None:
+            print("[MyBot] WARNING: choose_best_move returned None. Picking first legal move.")
+            legal_moves = list(board.legal_moves)
+            if not legal_moves:
+                print("[MyBot] No legal moves found.")
+                return chess.engine.PlayResult(None, 0.0) # Return an empty move
+            best_move = legal_moves[0]
+            best_score = 0.0
+
+        print(f"[MyBot] Move found: {best_move.uci()} (Score: {best_score:.4f})")
+        
+        # Send the move back to Lichess using the correct return type
+        return chess.engine.PlayResult(
+            move=best_move,
+            ponder=None, # We are not calculating a ponder move
+            info={
+                # Convert float score to a centipawn score object
+                "score": chess.engine.PovScore(chess.engine.Cp(int(best_score * 100)), chess.WHITE),
+                "depth": 10
+            }
+        )
