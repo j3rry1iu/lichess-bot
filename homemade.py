@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 from huggingface_hub import hf_hub_download
+import time
 
 # --- 1. CORRECT IMPORTS ---
 # These imports match the files in your lichess-bot repository
@@ -92,40 +93,50 @@ class MyPyTorchBot(MinimalEngine):
                      name="MyPyTorchBot", **popen_args)
 
     def search(self, board: chess.Board, time_limit: Limit, ponder: bool, draw_offered: bool, root_moves: MOVE) -> chess.engine.PlayResult:
-        """
-        This is the main function called by lichess-bot when it's our turn.
-        It must RETURN a chess.engine.PlayResult object.
-        """
-        print(f"[MyBot] Searching position: {board.fen()}")
+        # 1. Time Management
+        if time_limit.time is not None:
+            # Fixed time per move (e.g. "go movetime 5000")
+            time_to_think = time_limit.time
+        elif time_limit.white_clock is not None:
+            # Clock time: use 5% of remaining time
+            my_time = time_limit.white_clock if board.turn == chess.WHITE else time_limit.black_clock
+            time_to_think = max(0.5, my_time * 0.05) 
+        else:
+            time_to_think = 2.0 # Default for unlimited games
 
-        # Call your own search function from src/search/search.py
-        best_move, best_score = choose_best_move(
-            board=board,
-            model=MODEL,
-            device=DEVICE,
-            depth=3,
-            root_k=10,
-            child_k=5,
-        )
-
-        if best_move is None:
-            print("[MyBot] WARNING: choose_best_move returned None. Picking first legal move.")
-            legal_moves = list(board.legal_moves)
-            if not legal_moves:
-                print("[MyBot] No legal moves found.")
-                return chess.engine.PlayResult(None, 0.0) # Return an empty move
-            best_move = legal_moves[0]
-            best_score = 0.0
-
-        print(f"[MyBot] Move found: {best_move.uci()} (Score: {best_score:.4f})")
+        print(f"[MyBot] Thinking for {time_to_think:.2f} seconds...")
+        start_time = time.time()
         
-        # Send the move back to Lichess using the correct return type
+        best_move = None
+        best_score = 0.0
+        max_depth_reached = 0
+        
+        # 2. Iterative Deepening (Depth 1 -> Depth 10)
+        for depth in range(1, 15):
+            # Stop if we used > 50% of allocated time to prevent starting a deep search we can't finish
+            if time.time() - start_time > (time_to_think * 0.5):
+                break
+                
+            # Call the optimized search from Part 1
+            current_move, current_score = choose_best_move(
+                board, MODEL, DEVICE, depth=depth, root_k=15, child_k=8
+            )
+            
+            if current_move is not None:
+                best_move = current_move
+                best_score = current_score
+                max_depth_reached = depth
+                print(f"[MyBot] Depth {depth} | Move: {best_move} | Score: {best_score:.2f}")
+
+            # Forced Mate check (approx score > 0.9)
+            if abs(best_score) > 0.95: 
+                break
+
+        # 3. Return Result
         return chess.engine.PlayResult(
             move=best_move,
-            ponder=None, # We are not calculating a ponder move
             info={
-                # Convert float score to a centipawn score object
                 "score": chess.engine.PovScore(chess.engine.Cp(int(best_score * 100)), chess.WHITE),
-                "depth": 5
+                "depth": max_depth_reached 
             }
         )
