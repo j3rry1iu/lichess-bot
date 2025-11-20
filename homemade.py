@@ -134,7 +134,8 @@ class MyPyTorchBot(MinimalEngine):
 
         # 3. Return Result
         return chess.engine.PlayResult(
-            move=best_move,
+            move=best_move, 
+            ponder=None,
             info={
                 "score": chess.engine.PovScore(chess.engine.Cp(int(best_score * 100)), chess.WHITE),
                 "depth": max_depth_reached 
